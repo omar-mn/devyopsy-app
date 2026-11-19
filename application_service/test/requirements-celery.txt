@@ -1,0 +1,2 @@
+celery[redis]>=5.5,<6
+fakeredis>=2.31,<3

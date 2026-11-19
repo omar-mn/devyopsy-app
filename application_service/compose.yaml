@@ -1,0 +1,87 @@
+name: infraops-application
+
+services:
+  application-db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-application_service}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-application_service}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - application-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  broker:
+    image: redis:7.4-alpine
+    command:
+      [
+        "redis-server",
+        "--appendonly",
+        "yes",
+        "--maxmemory-policy",
+        "noeviction",
+      ]
+    ports:
+      - "127.0.0.1:${REDIS_PORT:-6379}:6379"
+    volumes:
+      - broker-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build: .
+    command: ["node", "scripts/migrate.js"]
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-application_service}:${POSTGRES_PASSWORD}@application-db:5432/${POSTGRES_DB:-application_service}
+    depends_on:
+      application-db:
+        condition: service_healthy
+
+  application-service:
+    build: .
+    env_file: .env
+    environment:
+      PORT: 3000
+      DATABASE_URL: postgresql://${POSTGRES_USER:-application_service}:${POSTGRES_PASSWORD}@application-db:5432/${POSTGRES_DB:-application_service}
+      REDIS_URL: redis://broker:6379/0
+      JWT_PUBLIC_KEY_FILE: /run/secrets/auth-public.pem
+    secrets:
+      - source: auth-public-key
+        target: auth-public.pem
+    ports:
+      - "127.0.0.1:${PORT:-3000}:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      broker:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:3000/health/ready/').then(r => { if (!r.ok) process.exit(1); }).catch(() => process.exit(1));"
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+secrets:
+  auth-public-key:
+    file: ${JWT_PUBLIC_KEY_FILE:?Set JWT_PUBLIC_KEY_FILE to the Auth Service PEM public key}
+
+volumes:
+  application-data:
+  broker-data:
+
+networks:
+  default:
+    name: infraops
